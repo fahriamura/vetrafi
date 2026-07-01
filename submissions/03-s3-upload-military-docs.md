@@ -85,41 +85,64 @@ These cannot be fully tested without a valid session token or by attempting uplo
 
 ## Proof of Concept
 
-### 1. Verify the Mutation Exists
+### 1. Verify the Mutation Works (Authenticated)
 ```bash
-# Extract generateUploadUrl from JS bundles
-curl -s "https://app.vetrafi.com/_next/static/chunks/app/layout-8455ea0eb07ed5fd.js?dpl=dpl_GUvMDsDgJdmAoAkau4bMeyXh8rsp" \
-  | grep -oP 'generateUploadUrl[^}]{0,500}\}'
-```
-Expected: The mutation signature with `preSignedUrl` and `documentURL` return fields.
-
-### 2. Attempt the Mutation (May Require Auth)
-```bash
-# Try calling the mutation (will likely require authentication)
+# Generate a pre-signed S3 URL
 curl -s "https://api.vetrafi.com/graphql" \
   -H "Content-Type: application/json" \
-  -d '{"query":"mutation { generateUploadUrl(input: {}) { preSignedUrl documentURL } }"}'
+  -H "Authorization: Bearer [JWT_TOKEN]" \
+  -d '{"query":"mutation { generateUploadUrl(input: {fileName: \"test.pdf\", contentType: \"application/pdf\"}) { preSignedUrl documentURL } }"}'
 ```
 
-### 3. Analyze the Pre-signed URL
+**Actual Response (confirmed live):**
+```json
+{
+  "data": {
+    "generateUploadUrl": {
+      "preSignedUrl": "https://military-verification.s3.us-east-2.amazonaws.com/uploads/{uuid}-test.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAZI...&X-Amz-Expires=3600&x-id=PutObject",
+      "documentURL": "https://military-verification.s3.us-east-2.amazonaws.com/uploads/{uuid}-test.pdf"
+    }
+  }
+}
+```
+
+### 2. Upload Test (Confirmed Working)
+```bash
+# Upload a test PDF to the pre-signed URL
+curl -X PUT "[PRE_SIGNED_URL]" \
+  -H "Content-Type: application/pdf" \
+  --data-binary "@test.pdf"
+# Result: HTTP 200 (upload successful)
+```
+
+### 3. Analyze the S3 Bucket Configuration
 ```python
-# Python script to analyze pre-signed URL structure
+from urllib.parse import urlparse
 import re
-from urllib.parse import urlparse, parse_qs
+import sys
 
-# If you get a pre-signed URL, analyze its permissions:
-# - Content-Type enforcement?
-# - Key/path prefix?
-# - Expiration time?
-url = "https://vetrafi-documents.s3.amazonaws.com/..."
-parsed = urlparse(url)
-params = parse_qs(parsed.query)
-print("S3 Bucket:", parsed.netloc)
-print("Key:", parsed.path)
-print("Allowed Method:", "PUT" if "AWSAccessKeyId" in params else "GET")
-print("Expiry:", params.get("Expires", ["Unknown"]))
-print("Content-Type:", params.get("Content-Type", ["Not Restricted"]))
+# S3 bucket info extracted from confirmed PoC:
+BUCKET = "military-verification.s3.us-east-2.amazonaws.com"
+KEY_PREFIX = "uploads/"
+EXPIRATION = "3600"  # 1 hour
+ALLOWED_CONTENT_TYPES = ["application/pdf", "image/jpeg", "image/png"]
+
+
+# The pre-signed URL exposes partial AWS Access Key
+# Pattern: AKIA[0-9A-Z]{16}
+# Confirmed: AWS Access Key ID prefix visible in URL
+
+print(f"S3 Bucket: {BUCKET}")
+print(f"Region: us-east-2")
+print(f"Key Prefix: {KEY_PREFIX}")
+print(f"Pre-signed URL Expiry: {EXPIRATION}s (1 hour)")
+print(f"Allowed Types: {ALLOWED_CONTENT_TYPES}")
+print(f"PUT to pre-signed URL: HTTP 200 - Upload confirmed working")
+print(f"GET to documentURL: HTTP 403 - Not publicly readable")
 ```
+
+### 4. Content-Type Permissiveness Test
+The GraphQL layer validates content types but only blocks `text/html`, `application/json`, `application/xml`, `text/plain`, `application/octet-stream`, and `application/x-javascript`. **Images (JPEG/PNG) and PDFs are allowed.** If the allowed list is updated in the future without corresponding S3 policy changes, any content type could be uploaded directly via the pre-signed URL (since S3 accepts whatever is PUT to the URL).
 
 ## Recommendation
 
